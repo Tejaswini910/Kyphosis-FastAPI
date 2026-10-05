@@ -5,6 +5,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -38,6 +39,24 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 async def require_login(request: Request, call_next):
     path = request.url.path
     public_paths = {"/login", "/api/health"}
+    is_page_navigation = (
+        request.headers.get("sec-fetch-mode") == "navigate"
+        and request.headers.get("sec-fetch-dest") == "document"
+    )
+    referer = urlsplit(request.headers.get("referer", ""))
+    is_internal_navigation = (
+        referer.scheme in {"http", "https"}
+        and referer.netloc.lower() == request.url.netloc.lower()
+    )
+    if (
+        path not in public_paths
+        and not path.startswith("/static/")
+        and request.session.get("authenticated")
+        and is_page_navigation
+        and not is_internal_navigation
+    ):
+        request.session.clear()
+        return RedirectResponse(url="/login", status_code=303)
     if (
         path not in public_paths
         and not path.startswith("/static/")
