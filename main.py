@@ -53,10 +53,11 @@ async def require_login(request: Request, call_next):
         and not path.startswith("/static/")
         and request.session.get("authenticated")
         and is_page_navigation
-        and not is_internal_navigation
     ):
-        request.session.clear()
-        return RedirectResponse(url="/login", status_code=303)
+        allow_login_redirect = request.session.pop("allow_login_redirect", False)
+        if not allow_login_redirect and not is_internal_navigation:
+            request.session.clear()
+            return RedirectResponse(url="/login", status_code=303)
     if (
         path not in public_paths
         and not path.startswith("/static/")
@@ -161,6 +162,7 @@ def login(
     request.session.clear()
     request.session["authenticated"] = True
     request.session["username"] = username
+    request.session["allow_login_redirect"] = True
     return RedirectResponse(url="/", status_code=303)
 
 
