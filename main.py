@@ -54,7 +54,7 @@ app.add_middleware(
     secret_key=SESSION_SECRET_KEY,
     same_site="lax",
     https_only=os.getenv("COOKIE_SECURE", "true").lower() == "true",
-    max_age=8 * 60 * 60,
+    max_age=None,
 )
 
 
