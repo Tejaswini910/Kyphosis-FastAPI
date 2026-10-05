@@ -1,10 +1,15 @@
 import csv
+import hmac
+import os
+import secrets
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -18,8 +23,73 @@ DATA_FILE = ROOT / "data" / "FASTAP" / "kyphosis (1).csv"
 STATIC_DIR = ROOT / "static"
 templates = Jinja2Templates(directory=STATIC_DIR)
 
-app = FastAPI(title="Kyphosis Explorer", version="1.0.0")
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY") or secrets.token_urlsafe(32)
+APP_USERNAME = os.getenv("APP_USERNAME", "admin")
+
+
+@asynccontextmanager
+async def validate_auth_config(_app: FastAPI):
+    if not os.getenv("APP_PASSWORD"):
+        raise RuntimeError(
+            "APP_PASSWORD must be set before starting the application. "
+            "Set a strong password in the environment."
+        )
+    yield
+
+
+app = FastAPI(
+    title="Kyphosis Explorer",
+    version="1.0.0",
+    lifespan=validate_auth_config,
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/login", "/api/health"}
+    if (
+        path not in public_paths
+        and not path.startswith("/static/")
+        and not request.session.get("authenticated")
+    ):
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "Authentication required"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
+    return await call_next(request)
+
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET_KEY,
+    same_site="lax",
+    https_only=os.getenv("COOKIE_SECURE", "true").lower() == "true",
+    max_age=8 * 60 * 60,
+)
+
+
+def csrf_token_for(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = token
+    return token
+
+
+def valid_csrf_token(request: Request, submitted_token: str) -> bool:
+    expected_token = request.session.pop("csrf_token", None)
+    return bool(
+        expected_token
+        and hmac.compare_digest(expected_token, submitted_token)
+    )
+
+
+def credentials_match(username: str, password: str) -> bool:
+    expected_password = os.getenv("APP_PASSWORD", "")
+    username_matches = hmac.compare_digest(username, APP_USERNAME)
+    password_matches = hmac.compare_digest(password, expected_password)
+    return username_matches and password_matches
 
 
 @lru_cache(maxsize=1)
@@ -38,19 +108,61 @@ def load_records() -> list[dict]:
         ]
 
 
-def page(name: str) -> FileResponse:
-    path = STATIC_DIR / name
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Page not found")
-    return FileResponse(path)
-
-
 def render_page(request: Request, name: str, **context):
     return templates.TemplateResponse(
         request=request,
         name=name,
-        context={"request": request, **context},
+        context={
+            "request": request,
+            "csrf_token": csrf_token_for(request),
+            "username": request.session.get("username", ""),
+            **context,
+        },
     )
+
+
+@app.get("/login", include_in_schema=False)
+def login_page(request: Request, error: Optional[str] = None):
+    if request.session.get("authenticated"):
+        return RedirectResponse(url="/", status_code=303)
+    return render_page(
+        request, "login.html", error=error, username_hint=APP_USERNAME
+    )
+
+
+@app.post("/login", include_in_schema=False)
+def login(
+    request: Request,
+    username: str = Form(),
+    password: str = Form(),
+    csrf_token: str = Form(),
+):
+    if not valid_csrf_token(request, csrf_token):
+        return render_page(
+            request,
+            "login.html",
+            error="Your session expired. Please try again.",
+            username_hint=APP_USERNAME,
+        )
+    if not credentials_match(username, password):
+        return render_page(
+            request,
+            "login.html",
+            error="Invalid username or password.",
+            username_hint=APP_USERNAME,
+        )
+    request.session.clear()
+    request.session["authenticated"] = True
+    request.session["username"] = username
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/logout", include_in_schema=False)
+def logout(request: Request, csrf_token: str = Form()):
+    if not valid_csrf_token(request, csrf_token):
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
 
 
 def filtered_records(
@@ -170,8 +282,8 @@ def prediction_page(request: Request):
 
 
 @app.get("/about", include_in_schema=False)
-def about_page() -> FileResponse:
-    return page("about-ui.html")
+def about_page(request: Request):
+    return render_page(request, "about-ui.html")
 
 
 @app.get("/api/health", include_in_schema=False)
