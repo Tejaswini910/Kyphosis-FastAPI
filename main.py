@@ -1,11 +1,12 @@
+import base64
 import csv
+import hashlib
 import hmac
 import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -43,20 +44,14 @@ async def require_login(request: Request, call_next):
         request.headers.get("sec-fetch-mode") == "navigate"
         and request.headers.get("sec-fetch-dest") == "document"
     )
-    referer = urlsplit(request.headers.get("referer", ""))
-    is_internal_navigation = (
-        referer.scheme in {"http", "https"}
-        and referer.netloc.lower() == request.url.netloc.lower()
-    )
     if (
         path not in public_paths
         and not path.startswith("/static/")
         and request.session.get("authenticated")
         and is_page_navigation
     ):
-        allow_login_redirect = request.session.pop("allow_login_redirect", False)
-        if not allow_login_redirect and not is_internal_navigation:
-            request.session.clear()
+        tab_token = request.query_params.get("_tab", "")
+        if not valid_tab_token(request, tab_token):
             return RedirectResponse(url="/login", status_code=303)
     if (
         path not in public_paths
@@ -84,6 +79,34 @@ def csrf_token_for(request: Request) -> str:
         token = secrets.token_urlsafe(32)
         request.session["csrf_token"] = token
     return token
+
+
+def create_tab_token(request: Request) -> str:
+    tab_id = secrets.token_urlsafe(24)
+    nonce = request.session["tab_nonce"]
+    signature = hmac.new(
+        SESSION_SECRET_KEY.encode(),
+        f"{nonce}:{tab_id}".encode(),
+        hashlib.sha256,
+    ).digest()
+    return f"{tab_id}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+
+
+def valid_tab_token(request: Request, token: str) -> bool:
+    nonce = request.session.get("tab_nonce")
+    try:
+        tab_id, supplied_signature = token.split(".", maxsplit=1)
+    except ValueError:
+        return False
+    if not nonce:
+        return False
+    expected_signature = hmac.new(
+        SESSION_SECRET_KEY.encode(),
+        f"{nonce}:{tab_id}".encode(),
+        hashlib.sha256,
+    ).digest()
+    expected = base64.urlsafe_b64encode(expected_signature).decode().rstrip("=")
+    return hmac.compare_digest(expected, supplied_signature)
 
 
 def valid_csrf_token(request: Request, submitted_token: str) -> bool:
@@ -123,6 +146,9 @@ def render_page(request: Request, name: str, **context):
         context={
             "request": request,
             "csrf_token": csrf_token_for(request),
+            "tab_token": request.query_params.get(
+                "_tab", request.session.get("tab_token", "")
+            ),
             "username": request.session.get("username", ""),
             **context,
         },
@@ -131,8 +157,6 @@ def render_page(request: Request, name: str, **context):
 
 @app.get("/login", include_in_schema=False)
 def login_page(request: Request, error: Optional[str] = None):
-    if request.session.get("authenticated"):
-        return RedirectResponse(url="/", status_code=303)
     return render_page(
         request, "login.html", error=error, username_hint=APP_USERNAME
     )
@@ -159,11 +183,14 @@ def login(
             error="Invalid username or password.",
             username_hint=APP_USERNAME,
         )
-    request.session.clear()
+    if not request.session.get("authenticated"):
+        request.session.clear()
+        request.session["tab_nonce"] = secrets.token_urlsafe(32)
     request.session["authenticated"] = True
     request.session["username"] = username
-    request.session["allow_login_redirect"] = True
-    return RedirectResponse(url="/", status_code=303)
+    tab_token = create_tab_token(request)
+    request.session["tab_token"] = tab_token
+    return RedirectResponse(url=f"/?_tab={tab_token}", status_code=303)
 
 
 @app.post("/logout", include_in_schema=False)

@@ -13,7 +13,7 @@
 <section class="panel auth-panel">
 <a class="brand auth-brand" href="/login"><span class="brand-mark">K</span><span>Kyphosis Data Explorer</span></a>
 <h1>Log in</h1>
-<p class="auth-intro">Sign in to access the dashboard and application data.</p>
+<p class="auth-intro">Sign in to access the dashboard and application data. Each new tab requires its own sign-in.</p>
 {% if error %}<p class="server-error" role="alert">{{ error }}</p>{% endif %}
 <form method="post" action="/login">
 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
