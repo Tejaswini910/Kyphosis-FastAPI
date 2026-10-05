@@ -2,7 +2,6 @@ import csv
 import hmac
 import os
 import secrets
-from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -25,22 +24,12 @@ templates = Jinja2Templates(directory=STATIC_DIR)
 
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY") or secrets.token_urlsafe(32)
 APP_USERNAME = os.getenv("APP_USERNAME", "admin")
-
-
-@asynccontextmanager
-async def validate_auth_config(_app: FastAPI):
-    if not os.getenv("APP_PASSWORD"):
-        raise RuntimeError(
-            "APP_PASSWORD must be set before starting the application. "
-            "Set a strong password in the environment."
-        )
-    yield
+APP_PASSWORD = os.getenv("APP_PASSWORD", "admin")
 
 
 app = FastAPI(
     title="Kyphosis Explorer",
     version="1.0.0",
-    lifespan=validate_auth_config,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -86,9 +75,8 @@ def valid_csrf_token(request: Request, submitted_token: str) -> bool:
 
 
 def credentials_match(username: str, password: str) -> bool:
-    expected_password = os.getenv("APP_PASSWORD", "")
     username_matches = hmac.compare_digest(username, APP_USERNAME)
-    password_matches = hmac.compare_digest(password, expected_password)
+    password_matches = hmac.compare_digest(password, APP_PASSWORD)
     return username_matches and password_matches
 
 
